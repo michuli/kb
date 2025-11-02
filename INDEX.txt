@@ -1,0 +1,35 @@
+================================================================
+KERR BLACK HOLE VISUALIZER - FILE INDEX
+================================================================
+
+PROJECT FILES:
+--------------
+1. main.cpp              - Main C++ application (365 lines)
+2. shader.vert           - Vertex shader (11 lines)
+3. shader.frag           - Fragment shader (10 lines)
+4. blackhole.comp        - Compute shader with physics (437 lines)
+
+BUILD SCRIPTS:
+--------------
+5. build_mingw.bat       - MinGW build script (84 lines)
+6. build_msvc.bat        - MSVC build script (91 lines)
+
+DOCUMENTATION:
+--------------
+7. README.md             - Main documentation (301 lines)
+8. QUICKSTART.md         - Quick setup guide (245 lines)
+9. PHYSICS_NOTES.md      - Physics details (476 lines)
+10. COMPILATION_COMMANDS.txt - All compile commands (227 lines)
+11. PROJECT_SUMMARY.txt  - Complete overview (454 lines)
+
+TOTAL: 11 files, 2,701 lines of code + documentation
+
+================================================================
+QUICK START:
+1. Extract all files to same directory
+2. Run build_mingw.bat (MinGW/MSYS2) or build_msvc.bat (Visual Studio)
+3. Run KerrBlackHole.exe
+4. Use controls: SPACE=pause, A/D=spin, W/S=inclination, ↑/↓=exposure
+
+See QUICKSTART.md for detailed setup instructions.
+================================================================

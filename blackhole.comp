@@ -1,0 +1,437 @@
+#version 450 core
+
+/*
+ * Kerr Black Hole Ray Tracer - Compute Shader
+ * 
+ * Implements:
+ * - Kerr metric in Boyer-Lindquist coordinates
+ * - RK4 geodesic integration for null rays
+ * - Frame dragging effects
+ * - Doppler beaming and gravitational redshift
+ * - Accretion disk with relativistic effects
+ * - Photon sphere and self-lensing
+ */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba32f, binding = 0) uniform image2D outputImage;
+
+// Uniforms
+uniform float uTime;
+uniform float uSpinParameter;       // Kerr spin a ∈ [0, 0.998]
+uniform float uExposure;
+uniform float uInclination;         // Observer inclination (degrees)
+uniform float uCameraDistance;
+uniform vec2 uResolution;
+
+// Constants
+const float M = 1.0;                // Black hole mass (geometric units)
+const float c = 1.0;                // Speed of light
+const int MAX_STEPS = 512;          // Maximum integration steps
+const float EPSILON = 1e-4;
+const float PI = 3.14159265359;
+
+// Accretion disk parameters
+const float DISK_INNER = 3.0;       // Inner stable circular orbit (ISCO)
+const float DISK_OUTER = 12.0;      // Outer disk radius
+const float DISK_THICKNESS = 0.15;  // Disk half-thickness
+
+// Ray state: (t, r, theta, phi, dt/dlambda, dr/dlambda, dtheta/dlambda, dphi/dlambda)
+struct RayState {
+    vec4 pos;      // (t, r, theta, phi)
+    vec4 vel;      // (dt/dlambda, dr/dlambda, dtheta/dlambda, dphi/dlambda)
+};
+
+// Kerr metric functions
+float sigma(float r, float theta, float a) {
+    float cosTheta = cos(theta);
+    return r * r + a * a * cosTheta * cosTheta;
+}
+
+float delta(float r, float a) {
+    return r * r - 2.0 * M * r + a * a;
+}
+
+float A_func(float r, float theta, float a) {
+    float sin2 = sin(theta) * sin(theta);
+    return (r * r + a * a) * (r * r + a * a) - a * a * delta(r, a) * sin2;
+}
+
+// Event horizon radius
+float eventHorizon(float a) {
+    return M + sqrt(M * M - a * a);
+}
+
+// Compute metric components g_μν
+void computeMetric(float r, float theta, float a, out float gtt, out float gtphi, 
+                   out float grr, out float gthth, out float gphiphi) {
+    float sig = sigma(r, theta, a);
+    float dlt = delta(r, a);
+    float sin2 = sin(theta) * sin(theta);
+    
+    gtt = -(1.0 - 2.0 * M * r / sig);
+    gtphi = -2.0 * M * a * r * sin2 / sig;
+    grr = sig / dlt;
+    gthth = sig;
+    gphiphi = A_func(r, theta, a) * sin2 / sig;
+}
+
+// Geodesic equations: d²x^μ/dλ² = -Γ^μ_νρ (dx^ν/dλ)(dx^ρ/dλ)
+vec4 geodesicDerivatives(vec4 pos, vec4 vel, float a) {
+    float r = pos.y;
+    float theta = pos.z;
+    
+    float sig = sigma(r, theta, a);
+    float dlt = delta(r, a);
+    float sin_theta = sin(theta);
+    float cos_theta = cos(theta);
+    float sin2 = sin_theta * sin_theta;
+    
+    // Precompute derivatives
+    float dsig_dr = 2.0 * r;
+    float dsig_dtheta = -2.0 * a * a * cos_theta * sin_theta;
+    float ddlt_dr = 2.0 * r - 2.0 * M;
+    
+    // Extract velocities
+    float dt = vel.x;
+    float dr = vel.y;
+    float dtheta = vel.z;
+    float dphi = vel.w;
+    
+    // Compute accelerations using Christoffel symbols (simplified form)
+    vec4 accel;
+    
+    // d²t/dλ²
+    accel.x = -(2.0 * M * r * (r * r - a * a * cos_theta * cos_theta)) / (sig * sig) * dr * dt;
+    accel.x -= (4.0 * M * a * r * cos_theta * sin_theta) / (sig * sig) * dtheta * dt;
+    accel.x += (2.0 * M * a * r * (r * r - a * a * cos_theta * cos_theta)) / (sig * sig) * dr * dphi;
+    accel.x += (2.0 * M * a * a * a * r * cos_theta * sin2 * sin_theta) / (sig * sig) * dtheta * dphi;
+    
+    // d²r/dλ²
+    float term1 = M * (r * r - a * a * cos_theta * cos_theta) / (sig * sig);
+    float term2 = (r * r - M * r + a * a) / sig;
+    float term3 = (sig - 2.0 * M * r) / (sig * dlt);
+    
+    accel.y = -term1 * dt * dt;
+    accel.y -= 2.0 * M * a * term1 * dt * dphi;
+    accel.y += term3 * ddlt_dr / 2.0 * dr * dr;
+    accel.y += term2 * dsig_dr / 2.0 * dr * dr / dlt;
+    accel.y -= term2 * dtheta * dtheta;
+    accel.y -= M * a * a * term1 * sin2 * dphi * dphi;
+    accel.y += term1 * A_func(r, theta, a) * sin2 / sig * dphi * dphi;
+    
+    // d²θ/dλ²
+    float term4 = a * a * cos_theta * sin_theta / (sig * sig);
+    
+    accel.z = term4 * M * dt * dt;
+    accel.z += 2.0 * M * a * r * r * term4 * dt * dphi;
+    accel.z -= dsig_dtheta / (2.0 * sig * dlt) * dr * dr;
+    accel.z += dsig_dtheta / (2.0 * sig) * dtheta * dtheta;
+    accel.z += cos_theta * sin_theta * dphi * dphi;
+    accel.z -= a * a * term4 * A_func(r, theta, a) * sin2 / sig * dphi * dphi;
+    
+    // d²φ/dλ²
+    accel.w = 2.0 * M * a / (sig * sig) * (dr * dt - a * a * cos_theta * sin_theta * dtheta * dt);
+    accel.w += 2.0 / r * dr * dphi;
+    accel.w += 2.0 * cos_theta / sin_theta * dtheta * dphi;
+    
+    return -accel;
+}
+
+// RK4 integration step
+void rk4Step(inout RayState state, float a, float dlambda) {
+    // k1
+    vec4 k1_vel = geodesicDerivatives(state.pos, state.vel, a);
+    vec4 k1_pos = state.vel;
+    
+    // k2
+    vec4 pos2 = state.pos + 0.5 * dlambda * k1_pos;
+    vec4 vel2 = state.vel + 0.5 * dlambda * k1_vel;
+    vec4 k2_vel = geodesicDerivatives(pos2, vel2, a);
+    vec4 k2_pos = vel2;
+    
+    // k3
+    vec4 pos3 = state.pos + 0.5 * dlambda * k2_pos;
+    vec4 vel3 = state.vel + 0.5 * dlambda * k2_vel;
+    vec4 k3_vel = geodesicDerivatives(pos3, vel3, a);
+    vec4 k3_pos = vel3;
+    
+    // k4
+    vec4 pos4 = state.pos + dlambda * k3_pos;
+    vec4 vel4 = state.vel + dlambda * k3_vel;
+    vec4 k4_vel = geodesicDerivatives(pos4, vel4, a);
+    vec4 k4_pos = vel4;
+    
+    // Update state
+    state.pos += dlambda / 6.0 * (k1_pos + 2.0 * k2_pos + 2.0 * k3_pos + k4_pos);
+    state.vel += dlambda / 6.0 * (k1_vel + 2.0 * k2_vel + 2.0 * k3_vel + k4_vel);
+    
+    // Keep theta in valid range
+    state.pos.z = clamp(state.pos.z, EPSILON, PI - EPSILON);
+}
+
+// Check if ray intersects accretion disk
+bool intersectDisk(vec4 pos, out float diskRadius) {
+    float r = pos.y;
+    float theta = pos.z;
+    
+    diskRadius = r;
+    
+    // Check if near equatorial plane
+    float distFromPlane = abs(theta - PI / 2.0);
+    
+    return (distFromPlane < DISK_THICKNESS && r >= DISK_INNER && r <= DISK_OUTER);
+}
+
+// Disk temperature and color (Shakura-Sunyaev model approximation)
+vec3 diskEmission(float r, float phi, float diskTime) {
+    // Temperature falls as r^(-3/4)
+    float temp = pow(DISK_INNER / r, 0.75);
+    
+    // Color temperature to RGB (simplified blackbody)
+    vec3 color;
+    if (temp > 0.8) {
+        color = vec3(0.6, 0.7, 1.0);  // Blue-white (hot inner disk)
+    } else if (temp > 0.5) {
+        color = vec3(1.0, 0.9, 0.7);  // Yellow-white
+    } else {
+        color = vec3(1.0, 0.6, 0.3);  // Orange (cooler outer disk)
+    }
+    
+    // Base emission intensity
+    float intensity = pow(DISK_INNER / r, 3.0);
+    
+    // Add temporal variation (turbulence)
+    float turbulence = 0.1 * sin(diskTime * 0.5 + phi * 8.0 + r * 0.5);
+    intensity *= (1.0 + turbulence);
+    
+    // Add spiral pattern
+    float spiral = 0.3 * sin(phi * 3.0 - diskTime * 0.3 + r * 0.2);
+    intensity *= (1.0 + spiral);
+    
+    return color * intensity;
+}
+
+// Compute Doppler and gravitational redshift factor
+float redshiftFactor(vec4 pos, vec4 vel, float a, float diskOmega) {
+    float r = pos.y;
+    float theta = pos.z;
+    float phi = pos.w;
+    
+    // Observer 4-velocity (at infinity, stationary)
+    vec4 u_obs = vec4(1.0, 0.0, 0.0, 0.0);
+    
+    // Disk material 4-velocity (Keplerian orbit)
+    float sig = sigma(r, theta, a);
+    float omega = diskOmega * M / (r * sqrt(r));  // Keplerian angular velocity
+    
+    // Compute metric components
+    float gtt, gtphi, grr, gthth, gphiphi;
+    computeMetric(r, theta, a, gtt, gtphi, grr, gthth, gphiphi);
+    
+    // Disk 4-velocity normalization
+    float ut_disk = 1.0 / sqrt(-gtt - 2.0 * omega * gtphi - omega * omega * gphiphi);
+    float uphi_disk = omega * ut_disk;
+    
+    vec4 u_emit = vec4(ut_disk, 0.0, 0.0, uphi_disk);
+    
+    // Redshift factor g = (k·u_obs) / (k·u_emit)
+    // For photon: k_μ = vel_μ (covariant momentum)
+    
+    // k·u_obs at infinity = -E (energy)
+    float E = -vel.x;  // Conserved energy
+    
+    // k·u_emit at disk
+    float k_dot_u_emit = gtt * vel.x * u_emit.x + gtphi * (vel.x * u_emit.w + vel.w * u_emit.x) 
+                         + gphiphi * vel.w * u_emit.w;
+    
+    float g = E / abs(k_dot_u_emit);
+    
+    return clamp(g, 0.1, 5.0);  // Clamp for numerical stability
+}
+
+// Procedural starfield
+vec3 starfield(vec3 dir) {
+    // Hash function for pseudo-random stars
+    float hash = fract(sin(dot(dir.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float hash2 = fract(sin(dot(dir.yz, vec2(93.9898, 67.233))) * 23758.5453);
+    
+    vec3 color = vec3(0.0);
+    
+    // Bright stars
+    if (hash > 0.998) {
+        float brightness = (hash - 0.998) / 0.002;
+        color = vec3(brightness) * vec3(1.0, 0.95, 0.9);
+    }
+    
+    // Dim stars
+    if (hash2 > 0.995) {
+        float brightness = (hash2 - 0.995) / 0.005 * 0.3;
+        color += vec3(brightness) * vec3(0.8, 0.85, 1.0);
+    }
+    
+    // Milky Way haze
+    float haze = pow(max(0.0, sin(dir.y * 3.0)), 3.0) * 0.1;
+    color += vec3(haze * 0.5, haze * 0.6, haze * 0.8);
+    
+    return color;
+}
+
+// ACES tone mapping
+vec3 acesToneMapping(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+}
+
+// Main ray tracing function
+vec3 traceRay(vec3 rayOrigin, vec3 rayDir, float a) {
+    // Convert camera position to Boyer-Lindquist coordinates
+    float r0 = length(rayOrigin);
+    float theta0 = acos(rayOrigin.y / r0);
+    float phi0 = atan(rayOrigin.z, rayOrigin.x);
+    
+    // Initialize ray state
+    RayState ray;
+    ray.pos = vec4(0.0, r0, theta0, phi0);
+    
+    // Initial 4-momentum (null geodesic condition)
+    // Assume conserved quantities: E (energy), L (angular momentum)
+    float E = 1.0;  // Energy at infinity
+    
+    // Convert ray direction to spherical components
+    vec3 e_r = normalize(rayOrigin);
+    vec3 e_theta = vec3(-e_r.y * e_r.x, 1.0 - e_r.y * e_r.y, -e_r.y * e_r.z);
+    e_theta = normalize(e_theta);
+    vec3 e_phi = cross(e_r, e_theta);
+    
+    float dr0 = dot(rayDir, e_r);
+    float dtheta0 = dot(rayDir, e_theta);
+    float dphi0 = dot(rayDir, e_phi);
+    
+    // Compute metric at initial position
+    float gtt, gtphi, grr, gthth, gphiphi;
+    computeMetric(r0, theta0, a, gtt, gtphi, grr, gthth, gphiphi);
+    
+    // Initial covariant momentum (approximate)
+    ray.vel.x = -E;  // p_t = -E (conserved)
+    ray.vel.y = dr0 * 0.1;
+    ray.vel.z = dtheta0 * 0.1;
+    ray.vel.w = dphi0 * 0.01;  // Angular momentum component
+    
+    // Adaptive step size
+    float dlambda = 0.05;
+    float r_horizon = eventHorizon(a);
+    
+    vec3 color = vec3(0.0);
+    bool hitSomething = false;
+    
+    // Integrate geodesic
+    for (int step = 0; step < MAX_STEPS; step++) {
+        float r = ray.pos.y;
+        float theta = ray.pos.z;
+        
+        // Adaptive step size (smaller near photon sphere)
+        float photonSphere = 1.5 * (1.0 + cos(2.0 * acos(a) / 3.0));
+        float distToPhotonSphere = abs(r - photonSphere);
+        dlambda = 0.02 + 0.08 * smoothstep(0.0, 2.0, distToPhotonSphere);
+        
+        // Check termination conditions
+        if (r < r_horizon) {
+            // Fell into black hole
+            color = vec3(0.0);
+            hitSomething = true;
+            break;
+        }
+        
+        if (r > 100.0) {
+            // Escaped to infinity - show starfield
+            vec3 finalDir = normalize(vec3(
+                sin(theta) * cos(ray.pos.w),
+                cos(theta),
+                sin(theta) * sin(ray.pos.w)
+            ));
+            color = starfield(finalDir);
+            hitSomething = true;
+            break;
+        }
+        
+        // Check disk intersection
+        float diskRadius;
+        if (intersectDisk(ray.pos, diskRadius)) {
+            // Compute disk emission with Doppler shift
+            float diskOmega = 1.0;
+            float g = redshiftFactor(ray.pos, ray.vel, a, diskOmega);
+            
+            vec3 emission = diskEmission(diskRadius, ray.pos.w, uTime);
+            
+            // Apply Doppler beaming (intensity ∝ g³)
+            emission *= pow(g, 3.0);
+            
+            color = emission;
+            hitSomething = true;
+            break;
+        }
+        
+        // Integrate one step
+        rk4Step(ray, a, dlambda);
+    }
+    
+    if (!hitSomething) {
+        // Max steps reached - fade to black
+        color = vec3(0.0);
+    }
+    
+    return color;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(uResolution.x) || pixelCoord.y >= int(uResolution.y)) {
+        return;
+    }
+    
+    // Normalized device coordinates
+    vec2 uv = (vec2(pixelCoord) + 0.5) / uResolution;
+    vec2 ndc = uv * 2.0 - 1.0;
+    ndc.x *= uResolution.x / uResolution.y;
+    
+    // Camera setup (orbiting)
+    float orbitAngle = uTime * 0.1;
+    float inclinationRad = radians(uInclination);
+    
+    vec3 cameraPos = vec3(
+        uCameraDistance * sin(inclinationRad) * cos(orbitAngle),
+        uCameraDistance * cos(inclinationRad),
+        uCameraDistance * sin(inclinationRad) * sin(orbitAngle)
+    );
+    
+    vec3 cameraTarget = vec3(0.0);
+    vec3 cameraUp = vec3(0.0, 1.0, 0.0);
+    
+    // Camera basis vectors
+    vec3 forward = normalize(cameraTarget - cameraPos);
+    vec3 right = normalize(cross(forward, cameraUp));
+    vec3 up = cross(right, forward);
+    
+    // Ray direction with field of view
+    float fov = 45.0;
+    float fovScale = tan(radians(fov) / 2.0);
+    vec3 rayDir = normalize(forward + right * ndc.x * fovScale + up * ndc.y * fovScale);
+    
+    // Trace ray through Kerr spacetime
+    vec3 color = traceRay(cameraPos, rayDir, uSpinParameter);
+    
+    // Apply exposure
+    color *= uExposure;
+    
+    // Tone mapping and gamma correction
+    color = acesToneMapping(color);
+    color = pow(color, vec3(1.0 / 2.2));  // Gamma correction
+    
+    // Write output
+    imageStore(outputImage, pixelCoord, vec4(color, 1.0));
+}

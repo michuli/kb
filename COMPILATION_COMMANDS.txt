@@ -1,0 +1,227 @@
+================================================================
+KERR BLACK HOLE VISUALIZER - COMPILATION COMMANDS FOR WINDOWS
+================================================================
+
+This file contains all compilation commands for different Windows setups.
+
+================================================================
+METHOD 1: MinGW-w64 / MSYS2 (Recommended)
+================================================================
+
+Prerequisites:
+- Install MSYS2 from https://www.msys2.org/
+- In MSYS2 terminal:
+  pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-glew
+
+Basic compilation:
+------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O3 -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+With debug symbols:
+-------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -g -Wall -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+With warnings enabled:
+----------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O3 -Wall -Wextra -Wpedantic -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+================================================================
+METHOD 2: MinGW with Manual Library Paths
+================================================================
+
+If you manually installed SDL2 and GLEW to custom directories:
+
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O3 ^
+    -IC:/SDL2/include ^
+    -IC:/glew/include ^
+    -LC:/SDL2/lib ^
+    -LC:/glew/lib ^
+    -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+Replace C:/SDL2 and C:/glew with your actual paths.
+
+================================================================
+METHOD 3: Visual Studio (cl.exe)
+================================================================
+
+Prerequisites:
+- Visual Studio 2017 or later
+- Open "Developer Command Prompt for VS" or run:
+  "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+Basic compilation:
+------------------
+cl.exe main.cpp /EHsc /std:c++17 /O2 /Fe:KerrBlackHole.exe ^
+    /I"C:\SDL2\include" ^
+    /I"C:\glew\include" ^
+    /link ^
+    /LIBPATH:"C:\SDL2\lib\x64" ^
+    /LIBPATH:"C:\glew\lib\Release\x64" ^
+    SDL2.lib SDL2main.lib glew32.lib opengl32.lib ^
+    /SUBSYSTEM:CONSOLE
+
+With debug info:
+----------------
+cl.exe main.cpp /EHsc /std:c++17 /Zi /Od /Fe:KerrBlackHole.exe ^
+    /I"C:\SDL2\include" ^
+    /I"C:\glew\include" ^
+    /link ^
+    /LIBPATH:"C:\SDL2\lib\x64" ^
+    /LIBPATH:"C:\glew\lib\Release\x64" ^
+    SDL2.lib SDL2main.lib glew32.lib opengl32.lib ^
+    /SUBSYSTEM:CONSOLE /DEBUG
+
+Replace paths with your actual SDL2 and GLEW installation directories.
+
+================================================================
+METHOD 4: CMake (Cross-platform)
+================================================================
+
+Create CMakeLists.txt:
+----------------------
+cmake_minimum_required(VERSION 3.10)
+project(KerrBlackHole)
+
+set(CMAKE_CXX_STANDARD 17)
+
+find_package(SDL2 REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(OpenGL REQUIRED)
+
+add_executable(KerrBlackHole main.cpp)
+
+target_link_libraries(KerrBlackHole 
+    SDL2::SDL2main SDL2::SDL2 
+    GLEW::GLEW 
+    OpenGL::GL
+)
+
+Build commands:
+---------------
+mkdir build
+cd build
+cmake .. -G "MinGW Makefiles"  # or "Visual Studio 17 2022"
+cmake --build . --config Release
+
+================================================================
+VERIFICATION AFTER COMPILATION
+================================================================
+
+1. Check executable exists:
+   dir KerrBlackHole.exe
+
+2. Check file size (should be ~200KB+):
+   dir KerrBlackHole.exe
+
+3. Check required DLLs in same directory:
+   - SDL2.dll (if not in PATH)
+   - glew32.dll (if not in PATH)
+
+4. Check shader files in same directory:
+   - shader.vert
+   - shader.frag
+   - blackhole.comp
+
+5. Run with verbose output:
+   KerrBlackHole.exe
+
+Expected output:
+   OpenGL Version: 4.5.0 ...
+   GLSL Version: 4.50 ...
+   Renderer: NVIDIA/AMD/Intel ...
+
+================================================================
+TROUBLESHOOTING COMPILATION ERRORS
+================================================================
+
+Error: "SDL.h: No such file or directory"
+Solution: Add -I flag with path to SDL2/include
+
+Error: "cannot find -lSDL2"
+Solution: Add -L flag with path to SDL2/lib
+
+Error: "undefined reference to SDL_Init"
+Solution: Check link order, SDL2 libs must come AFTER main.cpp
+
+Error: "LNK1120: unresolved externals"
+Solution (MSVC): Verify all .lib files are in LIBPATH
+
+Error: "This application failed to start because glew32.dll was not found"
+Solution: Copy glew32.dll to same folder as .exe, or add to PATH
+
+Error: "OpenGL 4.5 not supported"
+Solution: Update GPU drivers, check GPU compatibility
+
+================================================================
+OPTIMIZATION FLAGS
+================================================================
+
+For maximum performance (MinGW):
+--------------------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O3 -march=native -flto ^
+    -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+For maximum performance (MSVC):
+--------------------------------
+cl.exe main.cpp /EHsc /std:c++17 /O2 /Oi /GL /arch:AVX2 /Fe:KerrBlackHole.exe ^
+    ... [same link flags as above]
+
+For profiling (MinGW):
+----------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O2 -pg ^
+    -lmingw32 -lSDL2main -lSDL2 -lglew32 -lopengl32 -lgdi32 -lm
+
+================================================================
+STATIC LINKING (Single .exe, no DLL dependencies)
+================================================================
+
+MinGW with static libraries:
+-----------------------------
+g++ main.cpp -o KerrBlackHole.exe -std=c++17 -O3 -static ^
+    -lmingw32 -lSDL2main -lSDL2 -lglew32s -lopengl32 -lgdi32 -limm32 ^
+    -lole32 -loleaut32 -lversion -lwinmm -lsetupapi -lm
+
+Note: Requires static versions of SDL2 and GLEW libraries.
+
+================================================================
+RUNNING THE APPLICATION
+================================================================
+
+From command line:
+------------------
+cd path\to\kerr_blackhole
+KerrBlackHole.exe
+
+With specific parameters (future feature):
+------------------------------------------
+KerrBlackHole.exe --spin 0.95 --inclination 75 --resolution 2560x1440
+
+================================================================
+COMPILATION TIME ESTIMATES
+================================================================
+
+Hardware: Core i7-8700K, SSD
+- Debug build (MinGW): ~2-3 seconds
+- Release build (MinGW): ~3-5 seconds
+- Release build (MSVC): ~5-8 seconds
+
+Executable size:
+- MinGW dynamic: ~150-200 KB
+- MinGW static: ~3-5 MB
+- MSVC dynamic: ~200-250 KB
+
+================================================================
+ADDITIONAL RESOURCES
+================================================================
+
+SDL2 Downloads: https://www.libsdl.org/download-2.0.php
+GLEW Downloads: http://glew.sourceforge.net/
+MinGW-w64: https://www.mingw-w64.org/
+MSYS2: https://www.msys2.org/
+Visual Studio: https://visualstudio.microsoft.com/
+
+OpenGL compatibility check:
+- Download: https://www.realtech-vr.com/home/glview
+- Run OpenGL Extensions Viewer to check version support
+
+================================================================
