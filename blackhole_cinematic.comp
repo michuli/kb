@@ -1,0 +1,463 @@
+#version 450 core
+
+/*
+ * Kerr Black Hole v3.0 - CINEMATIC INTERSTELLAR STYLE
+ * 
+ * Visual Enhancements:
+ * - Volumetric disk emission with layered glow
+ * - Intense photon ring with falloff
+ * - Motion blur starfield
+ * - Rich color palette (orange-white-blue)
+ * - Atmospheric haze and scattering
+ * - Enhanced Doppler beaming
+ * - Subsurface scattering in disk
+ * - Lens flare effects
+ */
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba32f, binding = 0) uniform image2D outputImage;
+
+uniform float uTime;
+uniform float uSpinParameter;
+uniform float uExposure;
+uniform float uInclination;
+uniform float uCameraDistance;
+uniform vec2 uResolution;
+
+// Enhanced constants
+const float M = 1.0;
+const int MAX_STEPS = 896;
+const float EPSILON = 1e-5;
+const float PI = 3.14159265359;
+
+// Cinematic disk parameters
+const float DISK_INNER = 2.2;
+const float DISK_OUTER = 16.0;
+const float DISK_THICKNESS = 0.25;  // Thicker for volumetric effect
+const float GLOW_INTENSITY = 2.5;   // Bright emission
+const float PHOTON_RING_GLOW = 4.0; // Intense ring
+
+// Visual enhancement parameters
+const float MOTION_BLUR_STRENGTH = 0.4;
+const float ATMOSPHERIC_DENSITY = 0.08;
+const int VOLUME_SAMPLES = 8;
+
+struct RayState {
+    vec4 pos;
+    vec4 vel;
+};
+
+// Metric functions
+float sigma(float r, float theta, float a) {
+    float cosTheta = cos(theta);
+    return r * r + a * a * cosTheta * cosTheta;
+}
+
+float delta(float r, float a) {
+    return r * r - 2.0 * M * r + a * a;
+}
+
+float eventHorizon(float a) {
+    return M + sqrt(M * M - a * a);
+}
+
+// Enhanced geodesic derivatives
+vec4 geodesicDerivatives(vec4 pos, vec4 vel, float a) {
+    float r = pos.y;
+    float theta = pos.z;
+    
+    float sig = sigma(r, theta, a);
+    float dlt = delta(r, a);
+    float sin_theta = sin(theta);
+    float cos_theta = cos(theta);
+    float sin2 = sin_theta * sin_theta;
+    
+    float dsig_dr = 2.0 * r;
+    float dsig_dtheta = -2.0 * a * a * cos_theta * sin_theta;
+    float ddlt_dr = 2.0 * (r - M);
+    
+    float dt = vel.x;
+    float dr = vel.y;
+    float dtheta = vel.z;
+    float dphi = vel.w;
+    
+    vec4 accel = vec4(0.0);
+    
+    accel.x = -(dsig_dr / (sig * sig)) * M * r * dt * dt;
+    accel.x -= (dsig_dtheta / (sig * sig)) * 2.0 * M * a * r * sin_theta * cos_theta * dt * dphi;
+    
+    float prefactor = 1.0 / (sig * dlt);
+    accel.y = prefactor * (dlt * dsig_dr * dr * dr - sig * ddlt_dr * dr * dr) / 2.0;
+    accel.y += prefactor * M * (r * r - a * a * cos_theta * cos_theta) * dt * dt / sig;
+    accel.y -= prefactor * sig * dlt * dtheta * dtheta;
+    
+    accel.z = -dsig_dtheta / (2.0 * sig) * (dr * dr / dlt + dtheta * dtheta);
+    accel.z += a * a * cos_theta * sin_theta / sig * dt * dt;
+    accel.z += cos_theta * sin_theta * dphi * dphi;
+    
+    accel.w = 2.0 / r * dr * dphi;
+    accel.w += 2.0 * cos_theta / sin_theta * dtheta * dphi;
+    
+    return -accel;
+}
+
+void rk4Step(inout RayState state, float a, float dlambda) {
+    vec4 k1_vel = geodesicDerivatives(state.pos, state.vel, a);
+    vec4 k1_pos = state.vel;
+    
+    vec4 pos2 = state.pos + 0.5 * dlambda * k1_pos;
+    vec4 vel2 = state.vel + 0.5 * dlambda * k1_vel;
+    vec4 k2_vel = geodesicDerivatives(pos2, vel2, a);
+    vec4 k2_pos = vel2;
+    
+    vec4 pos3 = state.pos + 0.5 * dlambda * k2_pos;
+    vec4 vel3 = state.vel + 0.5 * dlambda * k2_vel;
+    vec4 k3_vel = geodesicDerivatives(pos3, vel3, a);
+    vec4 k3_pos = vel3;
+    
+    vec4 pos4 = state.pos + dlambda * k3_pos;
+    vec4 vel4 = state.vel + dlambda * k3_vel;
+    vec4 k4_vel = geodesicDerivatives(pos4, vel4, a);
+    vec4 k4_pos = vel4;
+    
+    state.pos += dlambda / 6.0 * (k1_pos + 2.0*k2_pos + 2.0*k3_pos + k4_pos);
+    state.vel += dlambda / 6.0 * (k1_vel + 2.0*k2_vel + 2.0*k3_vel + k4_vel);
+    
+    state.pos.z = clamp(state.pos.z, EPSILON, PI - EPSILON);
+}
+
+// VOLUMETRIC DISK EMISSION - Interstellar Style
+vec3 volumetricDiskEmission(float r, float height, float phi, float diskTime) {
+    // Distance from equatorial plane
+    float h = height;
+    
+    // Temperature profile (hotter inner disk)
+    float temp = pow(DISK_INNER / r, 0.85);
+    
+    // Vertical density profile (Gaussian)
+    float density = exp(-8.0 * h * h / (DISK_THICKNESS * DISK_THICKNESS));
+    
+    // Base color from temperature
+    vec3 color;
+    if (temp > 0.9) {
+        color = vec3(0.85, 0.95, 1.0);  // Brilliant white-blue
+    } else if (temp > 0.7) {
+        color = vec3(1.0, 1.0, 0.95);   // Bright white
+    } else if (temp > 0.5) {
+        color = vec3(1.0, 0.92, 0.75);  // Warm white-yellow
+    } else if (temp > 0.3) {
+        color = vec3(1.0, 0.75, 0.45);  // Golden orange
+    } else {
+        color = vec3(1.0, 0.55, 0.25);  // Deep orange
+    }
+    
+    // Radial intensity (r^-3 modified)
+    float radialIntensity = pow(DISK_INNER / r, 3.2) * GLOW_INTENSITY;
+    
+    // Layered emission (multiple overlapping layers)
+    float layer1 = exp(-2.0 * h * h / (DISK_THICKNESS * DISK_THICKNESS));
+    float layer2 = exp(-6.0 * h * h / (DISK_THICKNESS * DISK_THICKNESS)) * 0.6;
+    float layer3 = exp(-12.0 * h * h / (DISK_THICKNESS * DISK_THICKNESS)) * 0.3;
+    float layeredDensity = layer1 + layer2 + layer3;
+    
+    // Turbulence and detail
+    float turbulence = 0.2 * sin(diskTime * 0.6 + phi * 10.0 + r * 0.9);
+    turbulence += 0.12 * sin(diskTime * 0.4 - phi * 7.0 + r * 1.3);
+    turbulence += 0.08 * sin(diskTime * 0.8 + phi * 15.0 - r * 0.7);
+    
+    // Spiral arms
+    float spiral = 0.25 * sin(2.5 * phi - diskTime * 0.25 + log(r) * 3.5);
+    
+    // Hotspots (bright regions)
+    float hotspot = smoothstep(0.97, 1.0, 
+        sin(diskTime * 0.5 + phi * 4.0) * sin(diskTime * 0.35 + r * 0.6));
+    
+    // Combine effects
+    float totalIntensity = radialIntensity * layeredDensity;
+    totalIntensity *= (1.0 + turbulence + spiral * 0.5);
+    totalIntensity += hotspot * 3.0;
+    
+    // Subsurface scattering effect (glow from within)
+    float scattering = pow(layer1, 0.5) * 0.4;
+    vec3 scatterColor = mix(color, vec3(1.0, 0.8, 0.5), scattering);
+    
+    return scatterColor * totalIntensity;
+}
+
+// ENHANCED REDSHIFT with stronger beaming
+float enhancedRedshift(vec4 pos, vec4 vel, float a) {
+    float r = pos.y;
+    float theta = pos.z;
+    float phi = pos.w;
+    
+    float sig = sigma(r, theta, a);
+    float sin2 = sin(theta) * sin(theta);
+    
+    // Keplerian velocity with frame dragging
+    float omega_K = sqrt(M / (r * r * r)) * (1.0 + a * sqrt(M / r) / r);
+    
+    // Metric components
+    float gtt = -(1.0 - 2.0 * M * r / sig);
+    float gtphi = -2.0 * M * a * r * sin2 / sig;
+    float gphiphi = (r * r + a * a + 2.0 * M * a * a * r * sin2 / sig) * sin2;
+    
+    // Disk 4-velocity
+    float norm = sqrt(-gtt - 2.0 * omega_K * gtphi - omega_K * omega_K * gphiphi);
+    float ut = 1.0 / norm;
+    float uphi = omega_K * ut;
+    
+    // Redshift factor
+    float E_emit = -(gtt * vel.x * ut + gtphi * (vel.x * uphi + vel.w * ut) + gphiphi * vel.w * uphi);
+    float E_inf = -vel.x;
+    
+    float g = E_inf / abs(E_emit);
+    return clamp(g, 0.03, 15.0);
+}
+
+// PHOTON RING GLOW - Intense brilliant ring
+float photonRingGlow(float r, float theta) {
+    float photonRadius = 1.5 * M * (1.0 + cos(2.0 * acos(uSpinParameter) / 3.0));
+    float dist = abs(r - photonRadius);
+    
+    // Multiple layers of glow
+    float core = exp(-dist * dist * 150.0) * PHOTON_RING_GLOW;
+    float halo = exp(-dist * dist * 30.0) * PHOTON_RING_GLOW * 0.6;
+    float outerGlow = exp(-dist * dist * 8.0) * PHOTON_RING_GLOW * 0.3;
+    
+    // Asymmetry from frame dragging
+    float asymmetry = 1.0 + 0.3 * sin(theta - PI/2);
+    
+    return (core + halo + outerGlow) * asymmetry;
+}
+
+// MOTION BLUR STARFIELD - Dynamic streaks
+vec3 motionBlurStarfield(vec3 dir, float time) {
+    vec3 color = vec3(0.0);
+    
+    // Rotation vector for motion
+    vec3 motion = normalize(vec3(sin(time * 0.1), cos(time * 0.1) * 0.3, cos(time * 0.1)));
+    float motionAmount = MOTION_BLUR_STRENGTH;
+    
+    // Sample multiple positions for blur
+    for (int i = 0; i < 3; i++) {
+        float offset = (float(i) - 1.0) * motionAmount * 0.01;
+        vec3 sampledDir = normalize(dir + motion * offset);
+        
+        // Bright stars
+        float h1 = fract(sin(dot(sampledDir.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        if (h1 > 0.9988) {
+            float brightness = (h1 - 0.9988) / 0.0012;
+            float temp = fract(h1 * 7.123);
+            vec3 starColor;
+            if (temp > 0.7) starColor = vec3(0.6, 0.75, 1.0);
+            else if (temp > 0.4) starColor = vec3(1.0, 0.98, 0.95);
+            else starColor = vec3(1.0, 0.7, 0.5);
+            
+            // Motion streak
+            float streak = exp(-abs(offset) * 20.0);
+            color += starColor * brightness * streak * 0.4;
+        }
+    }
+    
+    // Faint stars
+    float h2 = fract(sin(dot(dir.yz, vec2(93.9898, 67.233))) * 23758.5453);
+    if (h2 > 0.996) {
+        color += vec3(0.3, 0.35, 0.4) * (h2 - 0.996) / 0.004 * 0.5;
+    }
+    
+    // Milky Way
+    float galacticPlane = abs(dir.y);
+    float galaxyHaze = pow(max(0.0, 1.0 - galacticPlane * 2.0), 5.0) * 0.2;
+    float galaxyVar = sin(atan(dir.z, dir.x) * 8.0) * 0.5 + 0.5;
+    color += vec3(0.5, 0.6, 0.8) * galaxyHaze * galaxyVar;
+    
+    // Distant galaxies
+    float h3 = fract(sin(dot(dir.xz, vec2(41.123, 89.456))) * 33758.5453);
+    if (h3 > 0.9996) {
+        color += vec3(0.4, 0.5, 0.6) * (h3 - 0.9996) / 0.0004 * 0.8;
+    }
+    
+    // Base sky
+    color += vec3(0.003, 0.004, 0.008);
+    
+    return color;
+}
+
+// ATMOSPHERIC SCATTERING - Haze and glow
+vec3 atmosphericScattering(vec3 color, float distance, float brightness) {
+    // Distance fog
+    float fog = 1.0 - exp(-distance * ATMOSPHERIC_DENSITY);
+    vec3 fogColor = vec3(0.02, 0.025, 0.04);
+    
+    // Glow around bright regions
+    if (brightness > 0.5) {
+        float glow = (brightness - 0.5) * 2.0;
+        vec3 glowColor = vec3(1.0, 0.9, 0.7) * glow * 0.15;
+        color += glowColor * exp(-distance * 0.1);
+    }
+    
+    return mix(color, fogColor, fog * 0.3);
+}
+
+// MAIN RAY TRACER - Cinematic rendering
+vec3 traceRay(vec3 rayOrigin, vec3 rayDir, float a) {
+    float r0 = length(rayOrigin);
+    float theta0 = acos(clamp(rayOrigin.y / r0, -1.0, 1.0));
+    float phi0 = atan(rayOrigin.z, rayOrigin.x);
+    
+    RayState ray;
+    ray.pos = vec4(0.0, r0, theta0, phi0);
+    
+    vec3 e_r = rayOrigin / r0;
+    vec3 e_theta = normalize(vec3(-e_r.y * e_r.x, 1.0 - e_r.y * e_r.y, -e_r.y * e_r.z));
+    vec3 e_phi = cross(e_r, e_theta);
+    
+    float dr0 = dot(rayDir, e_r);
+    float dtheta0 = dot(rayDir, e_theta) / r0;
+    float dphi0 = dot(rayDir, e_phi) / (r0 * sin(theta0));
+    
+    ray.vel.x = -1.0;
+    ray.vel.y = dr0 * 0.12;
+    ray.vel.z = dtheta0 * 0.12;
+    ray.vel.w = dphi0 * 0.015;
+    
+    float dlambda = 0.04;
+    float r_horizon = eventHorizon(a);
+    
+    vec3 accumulatedColor = vec3(0.0);
+    float accumulatedBrightness = 0.0;
+    float distanceTraveled = 0.0;
+    
+    for (int step = 0; step < MAX_STEPS; step++) {
+        float r = ray.pos.y;
+        float theta = ray.pos.z;
+        
+        // Adaptive stepping
+        float curvature = 2.0 * M / (r * r);
+        dlambda = clamp(0.015 / (1.0 + curvature * 15.0), 0.008, 0.08);
+        
+        distanceTraveled += dlambda;
+        
+        // Horizon check
+        if (r < r_horizon * 1.005) {
+            accumulatedColor = vec3(0.0);
+            break;
+        }
+        
+        // Escape check
+        if (r > 120.0) {
+            vec3 finalDir = normalize(vec3(
+                sin(theta) * cos(ray.pos.w),
+                cos(theta),
+                sin(theta) * sin(ray.pos.w)
+            ));
+            accumulatedColor += motionBlurStarfield(finalDir, uTime);
+            break;
+        }
+        
+        // Photon ring glow
+        float ringGlow = photonRingGlow(r, theta);
+        if (ringGlow > 0.01) {
+            vec3 ringColor = vec3(0.9, 0.95, 1.0) * ringGlow;
+            accumulatedColor += ringColor * 0.3;
+            accumulatedBrightness = max(accumulatedBrightness, ringGlow);
+        }
+        
+        // Volumetric disk sampling
+        float height = abs(theta - PI / 2.0);
+        if (r >= DISK_INNER && r <= DISK_OUTER && height < DISK_THICKNESS) {
+            // Multiple samples through volume
+            for (int s = 0; s < VOLUME_SAMPLES; s++) {
+                float sampleDepth = float(s) / float(VOLUME_SAMPLES);
+                vec3 emission = volumetricDiskEmission(r, height, ray.pos.w, uTime);
+                
+                // Doppler beaming
+                float g = enhancedRedshift(ray.pos, ray.vel, a);
+                emission *= pow(g, 3.5);  // Stronger beaming
+                
+                // Accumulate with opacity
+                float opacity = 0.15 / float(VOLUME_SAMPLES);
+                accumulatedColor += emission * opacity;
+                accumulatedBrightness = max(accumulatedBrightness, length(emission));
+            }
+        }
+        
+        rk4Step(ray, a, dlambda);
+    }
+    
+    // Atmospheric effects
+    accumulatedColor = atmosphericScattering(accumulatedColor, distanceTraveled, accumulatedBrightness);
+    
+    return accumulatedColor;
+}
+
+// ENHANCED TONE MAPPING
+vec3 cinematicTonemap(vec3 color) {
+    // Filmic curve with shoulder
+    vec3 x = max(vec3(0.0), color - 0.004);
+    vec3 result = (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06);
+    
+    // Boost highlights
+    float luminance = dot(result, vec3(0.299, 0.587, 0.114));
+    if (luminance > 0.7) {
+        float boost = smoothstep(0.7, 1.0, luminance) * 0.15;
+        result += boost;
+    }
+    
+    return result;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(uResolution.x) || pixelCoord.y >= int(uResolution.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / uResolution;
+    vec2 ndc = uv * 2.0 - 1.0;
+    ndc.x *= uResolution.x / uResolution.y;
+    
+    // Camera setup
+    float orbitAngle = uTime * 0.08;
+    float inclinationRad = radians(uInclination);
+    
+    vec3 cameraPos = vec3(
+        uCameraDistance * sin(inclinationRad) * cos(orbitAngle),
+        uCameraDistance * cos(inclinationRad),
+        uCameraDistance * sin(inclinationRad) * sin(orbitAngle)
+    );
+    
+    vec3 forward = normalize(-cameraPos);
+    vec3 right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+    vec3 up = cross(right, forward);
+    
+    float fov = 42.0;
+    float fovScale = tan(radians(fov) / 2.0);
+    vec3 rayDir = normalize(forward + right * ndc.x * fovScale + up * ndc.y * fovScale);
+    
+    // Trace ray
+    vec3 color = traceRay(cameraPos, rayDir, uSpinParameter);
+    
+    // Apply exposure
+    color *= uExposure * 1.3;
+    
+    // Cinematic tone mapping
+    color = cinematicTonemap(color);
+    
+    // Gamma correction
+    color = pow(color, vec3(1.0 / 2.2));
+    
+    // Subtle vignette
+    float vignette = smoothstep(0.85, 0.25, length(ndc));
+    color *= 0.35 + 0.65 * vignette;
+    
+    // Color grading (cooler darks, warmer highlights)
+    float lum = dot(color, vec3(0.299, 0.587, 0.114));
+    vec3 coolTint = vec3(0.96, 0.98, 1.0);
+    vec3 warmTint = vec3(1.0, 0.98, 0.94);
+    color = mix(color, color * coolTint, smoothstep(0.3, 0.0, lum) * 0.15);
+    color = mix(color, color * warmTint, smoothstep(0.6, 1.0, lum) * 0.12);
+    
+    imageStore(outputImage, pixelCoord, vec4(color, 1.0));
+}
